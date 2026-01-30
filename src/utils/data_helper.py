@@ -1,48 +1,38 @@
-#!/usr/bin/python3.5
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-""" Data, including point cloud and ground truth, preprocess helper function """
-# TODO KiTTI data helper
+""" 
+Data preprocessing helper functions for Sydney Urban Objects Dataset / KITTI.
+Includes point cloud loading, voxelization, and augmentation.
+"""
 
 import numpy as np
-import pcl
 import sys
 import os
 import glob
 
 # Sydney Urban Objects LiDAR dataset formats
-fields = ['t', 'intensity', 'id',
-          'x', 'y', 'z',
-          'azimuth', 'range', 'pid']
-types = ['int64', 'uint8', 'uint8',
-         'float32', 'float32', 'float32',
-         'float32', 'float32', 'int32']
+FIELDS = ['t', 'intensity', 'id', 'x', 'y', 'z', 'azimuth', 'range', 'pid']
+TYPES = ['int64', 'uint8', 'uint8', 'float32', 'float32', 'float32', 'float32', 'float32', 'int32']
 
-# label dict for Sydney Urban Object Dataset, ref:http://www.acfr.usyd.edu.au/papers/SydneyUrbanObjectsDataset.shtml
-SUOD_label_dictionary = {
+# Label dictionary
+SUOD_LABEL_MAP = {
     '4wd': 0, 'building': 1, 'bus': 2, 'car': 3, 'pedestrian': 4, 'pillar': 5, 'pole': 6,
     'traffic_lights': 7, 'traffic_sign': 8, 'tree': 9, 'truck': 10, 'trunk': 11, 'ute': 12, 'van': 13
 }
-SUOD_label_dictionary_rev = {
-    0: '4wd',            1: 'building',     2: 'bus',  3: 'car',    4: 'pedestrian', 5: 'pillar', 6: 'pole',
-    7: 'traffic_lights', 8: 'traffic_sign', 9: 'tree', 10: 'truck', 11: 'trunk',     12: 'ute',   13: 'van'
-}
+SUOD_LABEL_MAP_REV = {v: k for k, v in SUOD_LABEL_MAP.items()}
 
 OCCUPIED = 1
 FREE = 0
 
 def load_points_from_bin(bin_file, with_intensity=False):
     """
-
-    :param bin_file:
-    :param with_intensity:
-    :return: (N, 3) or (N, 4)
+    Load point cloud from a binary file.
     """
+    bin_type = np.dtype(dict(names=FIELDS, formats=TYPES))
+    data = np.fromfile(bin_file, bin_type)
 
-    binType = np.dtype(dict(names=fields, formats=types))
-    data = np.fromfile(bin_file, binType)
-
-    # 3D points, one per row
+    # Stack to (N, 3) or (N, 4)
     if with_intensity:
         points = np.vstack([data['x'], data['y'], data['z'], data['intensity']]).T
     else:
@@ -52,185 +42,175 @@ def load_points_from_bin(bin_file, with_intensity=False):
 
 
 def get_SUOD_label(index):
-    return SUOD_label_dictionary_rev[index]
+    """Retrieve string label from integer index."""
+    return SUOD_LABEL_MAP_REV.get(index, "Unknown")
 
 
 def save_pcd_from_bin(bin_file, with_intensity=False):
     """
-    Read bins from `fold` as x,y,z and convert into `*.pcd`
-
-    Args:
-    `fold` the path of fold*.txt that need to convert into pcd
-
+    Read bin file and convert to ASCII .pcd format without using external PCL library.
+    Compatible with Python 3.5 (No f-strings).
     """
-
     points = load_points_from_bin(bin_file, with_intensity)
-
-    cloud = pcl.PointCloud(np.float32(points))
-    pcl.save(cloud, '{}.pcd'.format(bin_file.split('.bin')[0]))
+    out_file = bin_file.replace('.bin', '.pcd')
+    
+    num_points = points.shape[0]
+    
+    # Python 3.5 compatible formatting
+    headers = [
+        '# .PCD v0.7 - Point Cloud Data file format',
+        'VERSION 0.7',
+        'FIELDS x y z{}'.format(" intensity" if with_intensity else ""),
+        'SIZE 4 4 4{}'.format(" 4" if with_intensity else ""),
+        'TYPE F F F{}'.format(" F" if with_intensity else ""),
+        'COUNT 1 1 1{}'.format(" 1" if with_intensity else ""),
+        'WIDTH {}'.format(num_points),
+        'HEIGHT 1',
+        'VIEWPOINT 0 0 0 1 0 0 0',
+        'POINTS {}'.format(num_points),
+        'DATA ascii'
+    ]
+    
+    with open(out_file, 'w') as f:
+        f.write('\n'.join(headers) + '\n')
+        np.savetxt(f, points, fmt='%.4f')
+    
+    print("Saved: {}".format(out_file))
 
 
 def voxelize(points, voxel_size=(24, 24, 24), padding_size=(32, 32, 32), resolution=0.1):
     """
-    Convert `points` to centerlized voxel with size `voxel_size` and `resolution`, then padding zero to
-    `padding_to_size`. The outside part is cut, rather than scaling the points.
-
+    Convert `points` to centralized voxel grid.
+    
     Args:
-    `points`: pointcloud in 3D numpy.ndarray
-    `voxel_size`: the centerlized voxel size, default (24,24,24)
-    `padding_to_size`: the size after zero-padding, default (32,32,32)
-    `resolution`: the resolution of voxel, in meters
-
-    Ret:
-    `voxel`:32*32*32 voxel occupany grid
-    `inside_box_points`:pointcloud inside voxel grid
+        points: (N, 3) numpy array
+        voxel_size: Dimensions of the object content (logical size)
+        padding_size: Dimensions of the output tensor (padded size)
+        resolution: Voxel resolution in meters
+        
+    Returns:
+        voxels: 3D Occupancy Grid (padded size)
+        inside_box_points: The subset of points that fit in the box
     """
-
     if abs(resolution) < sys.float_info.epsilon:
-        print('error input, resolution should not be zero')
+        print('Error: Resolution cannot be zero')
         return None, None
 
-    # remove all non-numeric elements of the said array
-    points = points[np.logical_not(np.isnan(points).any(axis=1))]
+    # Remove NaNs
+    points = points[~np.isnan(points).any(axis=1)]
 
-    # filter outside voxel_box by using passthrough filter
-    # TODO Origin, better use centroid?
-    origin = (np.min(points[:, 0]), np.min(points[:, 1]), np.min(points[:, 2]))
-    # set the nearest point as (0,0,0)
-    points[:, 0] -= origin[0]
-    points[:, 1] -= origin[1]
-    points[:, 2] -= origin[2]
-    # logical condition index
-    x_logical = np.logical_and((points[:, 0] < voxel_size[0] * resolution), (points[:, 0] >= 0))
-    y_logical = np.logical_and((points[:, 1] < voxel_size[1] * resolution), (points[:, 1] >= 0))
-    z_logical = np.logical_and((points[:, 2] < voxel_size[2] * resolution), (points[:, 2] >= 0))
-    xyz_logical = np.logical_and(x_logical, np.logical_and(y_logical, z_logical))
-    inside_box_points = points[xyz_logical]
+    if points.shape[0] == 0:
+        return np.zeros(padding_size), points
 
-    # init voxel grid with zero padding_to_size=(32*32*32) and set the occupany grid
-    voxels = np.zeros(padding_size)
-    # centerlize to padding box
-    center_points = inside_box_points + (padding_size[0] - voxel_size[0]) * resolution / 2
-    # TODO currently just use the binary hit grid
-    x_idx = (center_points[:, 0] / resolution).astype(int)
-    y_idx = (center_points[:, 1] / resolution).astype(int)
-    z_idx = (center_points[:, 2] / resolution).astype(int)
-    voxels[x_idx, y_idx, z_idx] = OCCUPIED
+    # Normalize to origin (0,0,0) based on min values
+    origin = np.min(points, axis=0)
+    points = points - origin
+
+    # Filter points outside the logical voxel_size
+    limit = np.array(voxel_size) * resolution
+    mask = np.all((points >= 0) & (points < limit), axis=1)
+    inside_box_points = points[mask]
+
+    # Initialize voxel grid
+    voxels = np.zeros(padding_size, dtype=np.int8)
+    
+    # Centralize: Offset points to center them within the padding box
+    offset_grids = (np.array(padding_size) - np.array(voxel_size)) / 2.0
+    offset_meters = offset_grids * resolution
+    
+    center_points = inside_box_points + offset_meters
+
+    # Discretize to indices
+    indices = (center_points / resolution).astype(int)
+
+    # Clip indices to ensure safety
+    indices[:, 0] = np.clip(indices[:, 0], 0, padding_size[0] - 1)
+    indices[:, 1] = np.clip(indices[:, 1], 0, padding_size[1] - 1)
+    indices[:, 2] = np.clip(indices[:, 2], 0, padding_size[2] - 1)
+
+    # Set occupancy
+    voxels[indices[:, 0], indices[:, 1], indices[:, 2]] = OCCUPIED
 
     return voxels, inside_box_points
 
 
 def point_transform(points, tx, ty, tz, rx=0, ry=0, rz=0):
     """
-      P(x, y, z) transform operation with translation(tx, ty, tz) and rotation(rx, ry, rz)
-    :param original points: (N, 3)
-    :param tx/y/z: in meter
-    :param rx/y/z: in radian
-    :return: transformed points: (N, 3)
+    Apply rotation (rx,ry,rz) first, then translation (tx,ty,tz).
     """
+    # Create Rotation Matrices
+    # Rx
+    c, s = np.cos(rx), np.sin(rx)
+    Rx = np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+    
+    # Ry
+    c, s = np.cos(ry), np.sin(ry)
+    Ry = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    
+    # Rz
+    c, s = np.cos(rz), np.sin(rz)
+    Rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
 
-    N = points.shape[0]
-    points = np.hstack([points, np.ones((N, 1))])
+    # Combined Rotation R = Rz * Ry * Rx (standard Euler order)
+    R = np.dot(Rz, np.dot(Ry, Rx))
 
-    mat1 = np.eye(4)
-    mat1[3, 0:3] = tx, ty, tz
-    points = np.matmul(points, mat1)
+    # Apply Rotation: P_rot = P @ R.T (because points are row vectors)
+    points_rot = np.dot(points, R.T)
 
-    if rx != 0:
-        mat = np.zeros((4, 4))
-        mat[0, 0] = 1
-        mat[3, 3] = 1
-        mat[1, 1] = np.cos(rx)
-        mat[1, 2] = -np.sin(rx)
-        mat[2, 1] = np.sin(rx)
-        mat[2, 2] = np.cos(rx)
-        points = np.matmul(points, mat)
-
-    if ry != 0:
-        mat = np.zeros((4, 4))
-        mat[1, 1] = 1
-        mat[3, 3] = 1
-        mat[0, 0] = np.cos(ry)
-        mat[0, 2] = np.sin(ry)
-        mat[2, 0] = -np.sin(ry)
-        mat[2, 2] = np.cos(ry)
-        points = np.matmul(points, mat)
-
-    if rz != 0:
-        mat = np.zeros((4, 4))
-        mat[2, 2] = 1
-        mat[3, 3] = 1
-        mat[0, 0] = np.cos(rz)
-        mat[0, 1] = -np.sin(rz)
-        mat[1, 0] = np.sin(rz)
-        mat[1, 1] = np.cos(rz)
-        points = np.matmul(points, mat)
-
-    return points[:, 0:3]
+    # Apply Translation
+    return points_rot + np.array([tx, ty, tz])
 
 
 def aug_data(points, aug_size, uniform_rotate_only=False):
     """
-    Object segments data augmentation, translation as well as rotation refer to VoxelNet
-
-    :param points:
-    :param aug_size: creating n copies of each input instance, n is 12 or 18 refer VoxNet.
-    :param uniform_rotate_only: just uniform rotate by "2π/aug_size"
-    :return:
+    Data augmentation via rotation and translation.
     """
-    np.random.seed()
-    rot_interval = 2 * np.pi / (aug_size+1)
-
+    rot_interval = 2 * np.pi / (aug_size + 1)
     points_list = [points]
-    for idx in range(1, aug_size+1):
-        # rotate by a uniformally distributed random variable
-        r_z = np.random.uniform(-np.pi / 10, np.pi / 10)
-        t_x = np.random.normal()
-        t_y = np.random.normal()
-        t_z = np.random.normal()
 
+    for idx in range(1, aug_size + 1):
         if uniform_rotate_only:
-            # creating n copies of each input instance, each rotated 360◦/n intervals around the z axis.
             r_z = rot_interval * idx
-            t_x = t_y = t_z = 0.
+            t_x = t_y = t_z = 0.0
+        else:
+            # Random jitter
+            r_z = np.random.uniform(-np.pi / 10, np.pi / 10)
+            t_x = np.random.normal(0, 0.1) 
+            t_y = np.random.normal(0, 0.1)
+            t_z = np.random.normal(0, 0.05)
 
-        # translation and rotation
-        points_list.append(point_transform(points, t_x, t_y, t_z, rz=r_z))
+        points_aug = point_transform(points, t_x, t_y, t_z, rz=r_z)
+        points_list.append(points_aug)
 
-    return np.float32(points_list)
+    return np.array(points_list, dtype=np.float32)
 
 
-def load_data_from_npy(npy_dir, mode='training', type='dense'):
+def load_data_from_npy(npy_dir, mode='training'):
     """
-    Get all voxels and corresponding labels from preprocess `npy_dir`.
-
-    Args:
-    `npy_dir`: path to the folder that contains `training` and `testing`.
-    `mode`: folder that contains all the `npy` datasets
-        training
-        testing
-    `type`: type of npy for future use in sparse tensor, values={`dense`,`sparse`}
-
-    Ret:
-    `voxels`: list of voxel grids ()
-    `labels`: list of labels
+    Load voxelized data and labels from .npy files.
     """
-
     input_path = os.path.join(npy_dir, mode, '*.npy')
-
-    # TODO:(vincent.cheung.mcer@gmail.com) not yet add support for multiresolution npy data
-    # TODO:(vincent.cheung.mcer@gmail.com) not yet support sparse npy
+    
     voxels_list = []
     label_list = []
-    for npy_f in glob.iglob(input_path):
-        # extract the label from path+file_name: e.g.`./voxel_npy/pillar.2.3582_12.npy`
-        file_name = npy_f.split('/')[-1]
-        label = SUOD_label_dictionary[file_name.split('.')[0]]
-        label_list.append(label)
+    
+    files = glob.glob(input_path)
+    if not files:
+        print("Warning: No files found in {}".format(input_path))
+        return np.array([]), np.array([])
 
-        # load *.npy
-        voxels = np.load(npy_f).astype(np.float32)
-        voxels_list.append(voxels)
-
+    for npy_f in files:
+        # Parse label from filename: e.g. "pillar.2.3582_12.npy" -> "pillar"
+        filename = os.path.basename(npy_f)
+        class_name = filename.split('.')[0]
+        
+        if class_name in SUOD_LABEL_MAP:
+            label = SUOD_LABEL_MAP[class_name]
+            label_list.append(label)
+            
+            voxels = np.load(npy_f).astype(np.float32)
+            voxels_list.append(voxels)
+        else:
+            print("Skipping unknown class: {}".format(class_name))
 
     return np.array(voxels_list), np.array(label_list)

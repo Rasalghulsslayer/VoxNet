@@ -4,6 +4,8 @@
 """ Functions for data visualization. """
 
 import numpy as np
+import matplotlib
+matplotlib.use('Agg') # <--- Add this line to fix the macOS error
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 

@@ -7,10 +7,20 @@ import os
 
 import numpy as np
 import tensorflow as tf
-import pcl
+#import pcl
 
 import utils.data_helper as helper
 import utils.visualization as viewer
+
+def read_sudo_bin(filename):
+    """
+    Lit un fichier binaire du dataset SUDO sans utiliser PCL.
+    Retourne un tableau numpy (N, 4) -> [x, y, z, intensité]
+    """
+    # Les fichiers SUDO sont des float32 bruts
+    points = np.fromfile(filename, dtype=np.float32)
+    # On reformate en colonnes de 4 valeurs (x, y, z, i)
+    return points.reshape(-1, 4)
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -74,13 +84,13 @@ if __name__=='__main__':
                 if FLAGS.viz:
                     viewer.plot3DVoxel(voxels)
 
-                # save pointcloud to *.pcd
-                if FLAGS.pcd:
-                    if inside_points.shape[0] > 0:
-                        pc = pcl.PointCloud(points)
-                        pcd_name = '{}/{}_{}.pcd'.format(save_dir, file_name.split('.bin')[0], idx)
-                        pcl.save(pc, pcd_name)
-                        print('saved pcd. {}'.format(pcd_name))
+    #            # save pointcloud to *.pcd
+    #            if FLAGS.pcd:
+    #                if inside_points.shape[0] > 0:
+    #                    pc = pcl.PointCloud(points)
+    #                    pcd_name = '{}/{}_{}.pcd'.format(save_dir, file_name.split('.bin')[0], idx)
+    #                    pcl.save(pc, pcd_name)
+    #                    print('saved pcd. {}'.format(pcd_name))
 
                 if inside_points.shape[0] > 0:
                     save_name = '{}/{}_{}.npy'.format(save_dir, file_name.split('.bin')[0], idx)
